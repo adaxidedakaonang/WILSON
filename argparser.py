@@ -1,5 +1,6 @@
 import argparse
 import tasks
+import os
 
 
 def modify_command_options(opts):
@@ -17,8 +18,7 @@ def modify_command_options(opts):
         opts.crop_size = 448
         opts.crop_size_val = 512
 
-    if opts.dataset == "coco-voc" and opts.new_protocol:
-        opts.crop_size = 321
+    if opts.dataset == "coco-voc":
         opts.crop_size_val = 512
         opts.output_stride = 8
         opts.backbone = 'wider_resnet38_a2'
@@ -35,6 +35,7 @@ def get_argparser():
     parser = argparse.ArgumentParser()
 
     # Performance Options
+    # parser.add_argument("--local_rank", type=int, default=int(os.environ['LOCAL_RANK']))
     parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument("--random_seed", type=int, default=42,
                         help="random seed (default: 42)")
@@ -187,5 +188,63 @@ def get_argparser():
     parser.add_argument("--ss_dist", action='store_true', default=False,
                         help="Dist on bkg prior")
     parser.add_argument("--l_seg", type=float, default=1)
+
+    # Replay parameters
+
+    parser.add_argument('--replay', action='store_true', default=False,
+                        help='Whether using the replay dataset from flickr')
+
+    parser.add_argument('--replay_path', default=r'D:\ADAXI\Datasets\increment\replay_images_and_labels\10',
+                        help='Replay dataset root path.')
+
+    parser.add_argument('--replay_num', default = 2, type=int,
+                        help='Max number of replay images per class')
+    
+    parser.add_argument('--delete_rpl_new', action='store_true', default=False,
+                        help='whether to delete the labels of new classes on the replay images.')
+    
+    parser.add_argument('--add_weight', action='store_true', default=False,
+                        help='whether to decrease weight of replay cross entropy.')
+    
+    parser.add_argument("--replay_epo", default=0, type=int,
+                        help='setting epoch of joining replay images')
+    
+    parser.add_argument("--fda", action='store_true', default=False,
+                        help='using fda')
+    
+
+
+    parser.add_argument('--cut_images', action='store_true', default=False,
+                        help='Whether to keep number of replay images same with the pascal at current training step.')
+
+    parser.add_argument('--web', action='store_true', default=False,
+                        help='Whether using the web images for new steps.')
+    
+    parser.add_argument('--web_num', default=None, type=int,
+                        help='Number of the web images per class for new steps.')
+    
+    parser.add_argument('--web_path', default=None, type=str,
+                        help='Path of the web images per class for new steps.')
+    
+    parser.add_argument('--no_train', default=False, action='store_true',
+                        help='load localizer instead of training it.')
+    parser.add_argument('--localizer_ckpt', type=str,
+                        help='path of localizer.')
+    
+    # parser.add_argument("--save_localizer")
+    # parser.add_argument('--mix', action='store_true', default=False,
+    #                     help='Whether using old model to generate old labels on new images.')
+
+    # # parser.add_argument('--return_feature', action='store_true', default=False,
+    # #                     help='Whether to output the prototypes.')
+
+    # parser.add_argument('--iterations', default=None, type=int,
+    #                     help='Control the maximum iterations number for each epoch.')
+
+    # parser.add_argument('--paint', default=False, action='store_true',
+    #                     help='Add new label to the past replay images.')
+    
+    # parser.add_argument('--paint_path', default=r"./tmp/labels/",
+    #                     help="Path of saving painted replay images.")
 
     return parser

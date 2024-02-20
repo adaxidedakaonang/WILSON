@@ -13,6 +13,9 @@ from dataset import get_dataset
 from metrics import StreamSegMetrics
 from train import Trainer
 
+from torch.utils.data import ConcatDataset
+from sampler import InterleaveSampler, DistributedInterleaveSampler
+
 
 def save_ckpt(path, trainer, epoch, best_score):
     """ save current model
@@ -33,7 +36,7 @@ def save_ckpt(path, trainer, epoch, best_score):
 
 def main(opts):
     distributed.init_process_group(backend='nccl', init_method='env://')
-    device_id, device = opts.local_rank, torch.device(opts.local_rank)
+    device_id, device = int(os.environ['LOCAL_RANK']), torch.device(int(os.environ['LOCAL_RANK']))
     rank, world_size = distributed.get_rank(), distributed.get_world_size()
     torch.cuda.set_device(device_id)
     opts.device_id = device_id
@@ -58,16 +61,27 @@ def main(opts):
     torch.cuda.manual_seed(opts.random_seed)
     np.random.seed(opts.random_seed)
     random.seed(opts.random_seed)
-
+    rpl_dst = None
     # xxx Set up dataloader
     opts.batch_size = opts.batch_size // world_size
+
     train_dst, val_dst, test_dst, labels, n_classes = get_dataset(opts)
     # reset the seed, this revert changes in random seed
     random.seed(opts.random_seed)
 
-    train_loader = data.DataLoader(train_dst, batch_size=opts.batch_size,
-                                   sampler=DistributedSampler(train_dst, num_replicas=world_size, rank=rank),
-                                   num_workers=opts.num_workers, drop_last=True)
+    # train_loader = data.DataLoader(train_dst, batch_size=opts.batch_size,
+    #                             sampler=DistributedSampler(train_dst, num_replicas=world_size, rank=rank),
+    #                             num_workers=opts.num_workers, drop_last=True)
+    if not train_dst.replayset is None:
+        concate_dataset = ConcatDataset([train_dst, train_dst.replayset])
+        interleave_sampler = InterleaveSampler(concate_dataset, batch_size=world_size*2, shuffle=True)
+        distributed_interleave_sampler = DistributedInterleaveSampler(interleave_sampler, num_replicas=world_size, shuffle=True)
+        train_loader = data.DataLoader(concate_dataset, sampler=distributed_interleave_sampler, batch_size=opts.batch_size, num_workers=opts.num_workers)
+    else:
+
+        train_loader = data.DataLoader(train_dst, batch_size=opts.batch_size,
+                                    sampler=DistributedSampler(train_dst, num_replicas=world_size, rank=rank),
+                                    num_workers=opts.num_workers, drop_last=True)
     val_loader = data.DataLoader(val_dst, batch_size=opts.batch_size if opts.crop_val else 1, shuffle=False,
                                  sampler=DistributedSampler(val_dst, num_replicas=world_size, rank=rank),
                                  num_workers=opts.num_workers)
@@ -91,13 +105,6 @@ def main(opts):
             path = f"checkpoints/step/{task_name}/{opts.name}_{opts.step - 1}.pth"
         trainer.load_step_ckpt(path)
 
-    # if opts.step > 0 and opts.weakly:
-    #     if opts.pl_ckpt is not None:
-    #         pl_path = opts.pl_ckpt
-    #     else:
-    #         pl_path = f"checkpoints/step/{task_name}/{opts.name}_{opts.step}w.pth"
-    #     trainer.load_pseudolabeler(pl_path)
-
     # Load training checkpoint if any
     if opts.continue_ckpt:
         opts.ckpt = ckpt_path
@@ -115,7 +122,6 @@ def main(opts):
     TRAIN = not opts.test
     val_metrics = StreamSegMetrics(n_classes)
     results = {}
-
     # check if random is equal here.
     logger.print(torch.randint(0, 100, (1, 1)))
     # train/val here
@@ -143,8 +149,13 @@ def main(opts):
             # =====  Save Best Model  =====
             if rank == 0:  # save best model at the last iteration
                 score = val_score['Mean IoU']
+                if score>best_score:
+                    best_score=score
+                    save_ckpt(ckpt_path[:-4]+"_best.pth", trainer, cur_epoch, score)
+                    logger.info("[!] Best checkpoint saved.")
                 # best model to build incremental steps
                 save_ckpt(ckpt_path, trainer, cur_epoch, score)
+                
                 logger.info("[!] Checkpoint saved.")
 
             # =====  Log metrics on Tensorboard =====
@@ -186,7 +197,7 @@ def main(opts):
         val_loader = data.DataLoader(val_dst, batch_size=1, shuffle=False,
                                      sampler=DistributedSampler(val_dst, num_replicas=world_size, rank=rank),
                                      num_workers=opts.num_workers)
-        val_score_cam = trainer.validate_CAM(loader=val_loader, metrics=val_metrics, multi_scale=True)
+        val_score_cam = trainer.validate_CAM(loader=val_loader, metrics=val_metrics)
         logger.add_scalar("Val_CAM/MeanAcc", val_score_cam['Agg'][1], cur_epoch)
         logger.add_scalar("Val_CAM/MeanPrec", val_score_cam['Agg'][2], cur_epoch)
         logger.add_scalar("Val_CAM/MeanIoU", val_score_cam['Mean IoU'], cur_epoch)
@@ -200,7 +211,7 @@ def main(opts):
                                   sampler=DistributedSampler(test_dst, num_replicas=world_size, rank=rank),
                                   num_workers=opts.num_workers)
 
-    val_score, = trainer.validate(loader=test_loader, metrics=val_metrics)
+    val_score = trainer.validate(loader=test_loader, metrics=val_metrics)
     logger.info(f"*** End of Test")
     logger.info(val_metrics.to_str(val_score))
     logger.add_table("Test/Class_IoU", val_score['Class IoU'])

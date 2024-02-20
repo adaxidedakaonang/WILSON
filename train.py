@@ -55,6 +55,11 @@ class Trainer:
         self.pseudo_epoch = opts.pseudo_ep
         cls_classes = self.tot_classes
         self.pseudolabeler = None
+        self.no_train = opts.no_train
+        self.pseudo_path = None
+        self.rpl_epo = opts.replay_epo
+        if self.no_train:
+            self.pseudo_path = opts.localizer_ckpt
 
         if self.weakly:
             self.affinity = PAMR(num_iter=10, dilations=[1, 2, 4, 8, 12]).to(device)
@@ -67,6 +72,8 @@ class Trainer:
                                                nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1, bias=False),
                                                norm(256),
                                                nn.Conv2d(256, cls_classes, kernel_size=1, stride=1))
+            
+            
 
             self.icarl = opts.icarl
 
@@ -135,8 +142,27 @@ class Trainer:
         if self.weakly:
             self.pseudolabeler = DistributedDataParallel(self.pseudolabeler.to(self.device), device_ids=[opts.device_id],
                                                          output_device=opts.device_id, find_unused_parameters=False)
+            if self.no_train:
+                self.pseudolabeler.load_state_dict(torch.load(self.pseudo_path))
+                print("WARNING !!!   Pseudolabeler is freezed.")
+                for p in self.pseudolabeler.parameters():
+                    p.requires_grad = False
+
+    def calc_one_hot(self, target, l1h):
+        target = torch.argmax(target, axis=1)
+        for idx in range(target.shape[0]):
+            target_cls = torch.unique(target[idx])
+            target_cls = target_cls[target_cls!=0]
+            for _ in target_cls:
+                l1h[idx][_-1] = 1
+        return l1h
 
     def train(self, cur_epoch, train_loader, print_int=10):
+
+        # if cur_epoch == self.pseudo_epoch:
+        #     self.pseudolabeler.load_state_dict(torch.load("./checkpoints/pseudolabeler/10-10.pth"))
+        #     print("Checkpoint loaded.")
+
         """Train and return epoch loss"""
         optim = self.optimizer
         scheduler = self.scheduler
@@ -170,6 +196,12 @@ class Trainer:
 
         model.train()
         for cur_step, (images, labels, l1h) in enumerate(train_loader):
+            # if cur_epoch<self.rpl_epo:
+            #     bs = images.shape[0]
+            #     images = images[:bs//2]
+            #     labels = labels[:bs//2]
+            #     l1h = l1h[:bs//2]
+                # print(images.shape)
 
             images = images.to(device, dtype=torch.float)
             l1h = l1h.to(device, dtype=torch.float)  # this are one_hot
@@ -182,6 +214,8 @@ class Trainer:
 
                 optim.zero_grad()
                 outputs, features = model(images, interpolate=False)
+                # bs = images.shape[0]
+                # l1h[bs//2:] = self.calc_one_hot(outputs_old[bs//2:], l1h[bs//2:])
 
                 # xxx BCE / Cross Entropy Loss
                 if not self.weakly:
@@ -218,22 +252,28 @@ class Trainer:
 
                 else:
                     bs = images.shape[0]
-
+                    
                     self.pseudolabeler.eval()
+                    # print("Start training pseudolabeler.")
                     int_masks = self.pseudolabeler(features['body']).detach()
+                    if not self.no_train:
 
-                    self.pseudolabeler.train()
-                    int_masks_raw = self.pseudolabeler(features['body'])
+                        self.pseudolabeler.train()
+                        int_masks_raw = self.pseudolabeler(features['body'])
 
-                    if self.opts.no_mask:
-                        l_cam_new = bce_loss(int_masks_raw, l1h, mode=self.opts.cam, reduction='mean')
+                        if self.opts.no_mask: # set False by default
+                            l_cam_new = bce_loss(int_masks_raw, l1h, mode=self.opts.cam, reduction='mean')
+                        else:
+                            l_cam_new = bce_loss(int_masks_raw, l1h[:, self.old_classes - 1:],
+                                                mode=self.opts.cam, reduction='mean')
+                        l_loc = F.binary_cross_entropy_with_logits(int_masks_raw[:, :self.old_classes,:],
+                                                                torch.sigmoid(outputs_old.detach()),
+                                                                reduction='mean')
+                        l_cam_int = l_cam_new + l_loc
                     else:
-                        l_cam_new = bce_loss(int_masks_raw, l1h[:, self.old_classes - 1:],
-                                             mode=self.opts.cam, reduction='mean')
-                    l_loc = F.binary_cross_entropy_with_logits(int_masks_raw[:, :self.old_classes],
-                                                               torch.sigmoid(outputs_old.detach()),
-                                                               reduction='mean')
-                    l_cam_int = l_cam_new + l_loc
+                        # print("WARNING !!!   Pseudolabeler is freezed.")
+
+                        l_cam_int = 0
 
                     if self.lde_flag:
                         lde = self.lde * self.lde_loss(features['body'], features_old['body'])
@@ -241,7 +281,13 @@ class Trainer:
                     l_cam_out = 0 * outputs[0, 0].mean()  # avoid errors due to DDP
 
                     if cur_epoch >= self.pseudo_epoch:
+                        # if cur_epoch == self.pseudo_epoch:
 
+                        #     # torch.save(self.pseudolabeler.state_dict(), "./checkpoints/pseudolabeler/10-10.pth")
+                        #     # print("checkpoint saved.")
+                        #     self.pseudolabeler.load_state_dict(torch.load("./checkpoints/pseudolabeler/10-10.pth"))
+                        #     print("Checkpoint loaded.")
+                        #     self.pseudolabeler.train()
                         int_masks_orig = int_masks.softmax(dim=1)
                         int_masks_soft = int_masks.softmax(dim=1)
 
@@ -250,7 +296,6 @@ class Trainer:
                             im = F.interpolate(image_raw, int_masks.shape[-2:], mode="bilinear",
                                                align_corners=True)
                             int_masks_soft = self.affinity(im, int_masks_soft.detach())
-
                         int_masks_orig[:, 1:] *= l1h[:, :, None, None]
                         int_masks_soft[:, 1:] *= l1h[:, :, None, None]
 
@@ -269,19 +314,28 @@ class Trainer:
                                     batch_weight.sum(dim=1) == (self.tot_classes - self.old_classes)).float()
 
                         target_old = torch.sigmoid(outputs_old.detach())
-
+                        # 
+                        # target_old[:bs//2] = 0
+                        # 
+                        if self.opts.delete_rpl_new:
+                            
+                            pseudo_gt_seg_lx[bs//2:, self.old_classes:, :] = 0
                         target = torch.cat((target_old, pseudo_gt_seg_lx[:, self.old_classes:]), dim=1)
                         if self.opts.icarl_bkg == -1:
                             target[:, 0] = torch.min(target[:, 0], pseudo_gt_seg_lx[:, 0])
                         else:
                             target[:, 0] = (1-self.opts.icarl_bkg) * target[:, 0] + \
                                            self.opts.icarl_bkg * pseudo_gt_seg_lx[:, 0]
-
+                        
                         l_seg = F.binary_cross_entropy_with_logits(outputs, target, reduction='none').sum(dim=1)
                         l_seg = l_seg.view(bs, -1).mean(dim=-1)
+                        if self.opts.add_weight:
+                            batch_weight[:batch_weight.shape[0]//2] *= 1.5
                         l_seg = self.opts.l_seg * (batch_weight * l_seg).sum() / (batch_weight.sum() + 1e-5)
-
-                        l_cls = balanced_mask_loss_ce(int_masks_raw, pseudo_gt_seg, l1h)
+                        if not self.no_train:
+                            l_cls = balanced_mask_loss_ce(int_masks_raw, pseudo_gt_seg, l1h)
+                        else:
+                            l_cls = 0
 
                     loss = l_seg + l_cam_out
                     l_reg = l_cls + l_cam_int
