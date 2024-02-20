@@ -1,8 +1,9 @@
-from .voc import VOCSegmentation, VOCSegmentationIncremental, VOCasCOCOSegmentationIncremental
+from .voc import VOCSegmentation, VOCSegmentationIncremental, VOCasCOCOSegmentationIncremental, VOCWebSegmentationIncremental, VOCWebasCOCOSegmentationIncremental
 from .coco import COCO, COCOIncremental
 from .transform import *
 import tasks
 import os
+from .utils import Replayset
 
 
 def get_dataset(opts):
@@ -35,33 +36,48 @@ def get_dataset(opts):
     masking_value = 0
 
     if opts.dataset == 'voc':
-        t_dataset = dataset = VOCSegmentationIncremental
+        if opts.web:
+            dataset = VOCWebSegmentationIncremental
+            v_dataset = t_dataset = VOCSegmentationIncremental
+        else:
+            t_dataset = dataset = v_dataset = VOCSegmentationIncremental
     elif opts.dataset == 'coco':
-        t_dataset = dataset = COCOIncremental
+        t_dataset = dataset = v_dataset = COCOIncremental
     elif opts.dataset == 'coco-voc':
         if opts.step == 0:
-            t_dataset = dataset = COCOIncremental
+            t_dataset = dataset = v_dataset = COCOIncremental
         else:
-            dataset = VOCasCOCOSegmentationIncremental
-            t_dataset = COCOIncremental
+            if opts.web:
+                dataset = VOCWebasCOCOSegmentationIncremental
+                v_dataset = VOCasCOCOSegmentationIncremental
+                t_dataset = COCOIncremental
+            else:
+                dataset = v_dataset = VOCasCOCOSegmentationIncremental
+                t_dataset = COCOIncremental
     else:
         raise NotImplementedError
 
     if opts.overlap and opts.dataset == 'voc':
         path_base += "-ov"
+        
 
     path_base_train = path_base
 
     if not os.path.exists(path_base):
         os.makedirs(path_base, exist_ok=True)
 
-    train_dst = dataset(root=opts.data_root, step_dict=step_dict, train=True, transform=train_transform,
+    # train_dst = dataset(root=opts.data_root, step_dict=step_dict, web_num=opts.web_num, web_path=opts.web_path, train=True, transform=train_transform,
+    #                     idxs_path=path_base_train + f"/train-{opts.step}.npy", masking_value=masking_value,
+    #                     masking=not opts.no_mask, overlap=opts.overlap, step=opts.step, weakly=opts.weakly,
+    #                     pseudo=pseudo)
+    train_dst = dataset(root=opts.data_root, step_dict=step_dict, web_num=opts.web_num, web_path=opts.web_path, train=True, transform=train_transform,
                         idxs_path=path_base_train + f"/train-{opts.step}.npy", masking_value=masking_value,
                         masking=not opts.no_mask, overlap=opts.overlap, step=opts.step, weakly=opts.weakly,
-                        pseudo=pseudo)
+                        pseudo=pseudo, replay=opts.replay,
+                        replay_path=opts.replay_path, replay_num=opts.replay_num, fda=opts.fda)
 
     # Val is masked with 0 when label is not known or is old (masking=True, masking_value=0)
-    val_dst = dataset(root=opts.data_root, step_dict=step_dict, train=False, transform=val_transform,
+    val_dst = v_dataset(root=opts.data_root, step_dict=step_dict, train=False, transform=val_transform,
                       idxs_path=path_base + f"/val-{opts.step}.npy", masking_value=masking_value,
                       masking=False, overlap=opts.overlap, step=opts.step, weakly=opts.weakly)
 
@@ -70,6 +86,10 @@ def get_dataset(opts):
     test_dst = t_dataset(root=opts.data_root, step_dict=step_dict, train=opts.val_on_trainset, transform=test_transform,
                          masking=False, masking_value=255, weakly=opts.weakly,
                          idxs_path=path_base + f"/test_on_{image_set}-{opts.step}.npy", step=opts.step)
+    
+    # if opts.replay:
+    #    replayset = Replayset(path=opts.replay_path, labels_old=labels_old, labels = labels, transform=train_transform, num_per_class=opts.replay_num)
+    #    return train_dst, replayset, val_dst, test_dst, labels_cum, len(labels_cum)
 
     return train_dst, val_dst, test_dst, labels_cum, len(labels_cum)
 

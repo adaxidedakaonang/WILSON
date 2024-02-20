@@ -2,12 +2,16 @@ import os
 import torch.utils.data as data
 from torch import from_numpy
 import numpy as np
+from .utils import Replayset
+import torch
 
 
-class IncrementalSegmentationDataset(data.Dataset):
+class IncrementalSegmentationDataset(torch.utils.data.Dataset):
     def __init__(self,
                  root,
                  step_dict,
+                 web_num = 500,
+                 web_path = None,
                  train=True,
                  transform=None,
                  idxs_path=None,
@@ -16,7 +20,11 @@ class IncrementalSegmentationDataset(data.Dataset):
                  masking_value=0,
                  step=0,
                  weakly=False,
-                 pseudo=None):
+                 pseudo=None,
+                 replay=False,
+                 replay_path = None,
+                 replay_num = 2,
+                 fda=False):
 
         # take index of images with at least one class in labels and all classes in labels+labels_old+[255]
         if train:
@@ -27,7 +35,10 @@ class IncrementalSegmentationDataset(data.Dataset):
         else:  # In both test and validation we want to use all data available (even if some images are all bkg)
             idxs = None
 
-        self.dataset = self.make_dataset(root, train, indices=idxs, pseudo=pseudo)
+        
+
+        
+
         self.transform = transform
         self.weakly = weakly  # don't use weakly in val
         self.train = train
@@ -36,6 +47,8 @@ class IncrementalSegmentationDataset(data.Dataset):
         self.labels = []
         self.labels_old = []
         self.step = step
+        self.web_num = web_num
+        self.web_path = web_path
 
         self.order = [c for s in sorted(step_dict) for c in step_dict[s]]
         # assert not any(l in labels_old for l in labels), "Labels and labels_old must be disjoint sets"
@@ -44,6 +57,8 @@ class IncrementalSegmentationDataset(data.Dataset):
         else:
             self.labels = list(step_dict[step])
         self.labels_old = [lbl for s in range(step) for lbl in step_dict[s]]
+
+        self.dataset = self.make_dataset(root, train, indices=idxs, pseudo=pseudo)
 
         self.masking_value = masking_value
         self.masking = masking
@@ -68,6 +83,14 @@ class IncrementalSegmentationDataset(data.Dataset):
         # else:
         #     self.dataset.img_lvl_only = True
         self.transform_1h = LabelSelection(self.order, self.labels, self.masking)
+
+        #########################################REPLAY
+        self.replayset = None
+        self.replay_path = replay_path
+        if train and step and replay:
+            self.replayset = Replayset(path=self.replay_path, labels_old=self.labels_old, labels = self.labels, transform=transform, num_per_class=replay_num, fda=fda)
+
+        #########################################
 
     def set_up_void_test(self):
         self.inverted_order[255] = 255
